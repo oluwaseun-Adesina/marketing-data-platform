@@ -1,0 +1,67 @@
+name: marketing_platform
+version: "1.0.0"
+config-version: 2
+require-dbt-version: [">=1.10.0", "<2.0.0"]  # 1.8+ unit tests, 1.10+ `arguments:` test syntax
+
+profile: marketing_platform
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+analysis-paths: ["analyses"]
+docs-paths: ["docs", "models"]
+
+clean-targets: ["target", "dbt_packages"]
+
+flags:
+  # Required by Elementary (dbt >= 1.8) so its test materialization can
+  # capture test results and failed rows.
+  require_explicit_package_overrides_for_builtin_materializations: false
+  source_freshness_run_project_hooks: true
+
+vars:
+  # Watermark overlap for the incremental fact (hours). Rows ingested within this
+  # window before the current high-water mark are re-merged, covering
+  # clock skew and loads that finish out of order.
+  incremental_overlap_hours: 6
+  reporting_currency: EUR
+
+# ---------------------------------------------------------------------------
+# Materialization strategy (reasoning in README, "Materializations")
+#   staging       view         : thin rename/cast layer. Always fresh, no storage, cheap at this volume.
+#   intermediate  view         : reusable joins/aggregations. Kept queryable so it can be unit-tested and debugged.
+#                 ephemeral    : int_marketing__ad_daily_unioned only. Pure UNION, single consumer.
+#   marts         table        : read often by BI and agents, so compute once per run, not on every query.
+#                 incremental  : fct_ad_performance_daily. Merge on key + ingestion watermark.
+#                 view         : mart_platform_monthly. Tiny aggregate, always consistent with the fact.
+# ---------------------------------------------------------------------------
+models:
+  marketing_platform:
+    +persist_docs:            # push dbt descriptions into Unity Catalog comments,
+      relation: true          # so they show in Catalog Explorer, Genie and to
+      columns: true           # any agent that reads table metadata
+    staging:
+      +schema: staging
+      +materialized: view
+      +tags: ["staging"]
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+      +tags: ["intermediate"]
+    marts:
+      +schema: marts
+      +materialized: table
+      +tags: ["marts"]
+
+  elementary:
+    +schema: elementary
+
+seeds:
+  marketing_platform:
+    +schema: staging
+    +tags: ["reference"]
+
+data_tests:
+  marketing_platform:
+    +store_failures: false

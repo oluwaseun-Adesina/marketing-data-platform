@@ -1,0 +1,13 @@
+target/
+dbt_packages/
+logs/
+edr_target/
+prod-state/
+site/
+.user.yml
+.env
+*.duckdb
+__pycache__/
+.venv/
+venv/
+.DS_Store

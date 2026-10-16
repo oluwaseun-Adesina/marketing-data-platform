@@ -1,0 +1,78 @@
+# -----------------------------------------------------------------------------
+# dbt connection profiles. This file is committed: it contains NO secrets.
+# Every credential is read from an environment variable at run time.
+#
+#   target   catalog    schema prefix   identity                    auth
+#   -------  ---------  --------------  --------------------------  -----------------------------
+#   dev      mkt_dev    dbt_<you>       you (a person)              personal token, laptop only
+#   ci       mkt_ci     pr_<number>     service principal sp-dbt-ci   OAuth M2M (client id/secret)
+#   prod     mkt_prod   (none)          service principal sp-dbt-prod OAuth M2M (client id/secret)
+#
+# Production never uses a personal access token. It authenticates as a service
+# principal with OAuth machine-to-machine. The short-lived OAuth tokens are
+# minted by the SDK from the client id/secret, which live only in GitHub's
+# "production" environment secrets.
+# -----------------------------------------------------------------------------
+marketing_platform:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+
+    dev:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      catalog: mkt_dev
+      schema: "dbt_{{ env_var('DBT_DEV_USER', 'dev') }}"
+      # Personal credentials are acceptable for a developer's own sandbox.
+      # Even better: delete the token line and set `auth_type: oauth` to log in
+      # through the browser (U2M OAuth), so there is no token on disk at all.
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 4
+
+    ci:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      catalog: mkt_ci
+      schema: "{{ env_var('DBT_CI_SCHEMA', 'pr_local') }}"
+      auth_type: oauth
+      client_id: "{{ env_var('DATABRICKS_CLIENT_ID') }}"
+      client_secret: "{{ env_var('DATABRICKS_CLIENT_SECRET') }}"
+      threads: 8
+
+    prod:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      catalog: mkt_prod
+      schema: marts            # fallback only; every model sets its own schema
+      auth_type: oauth
+      client_id: "{{ env_var('DATABRICKS_CLIENT_ID') }}"
+      client_secret: "{{ env_var('DATABRICKS_CLIENT_SECRET') }}"
+      threads: 8
+      connect_retries: 3
+      connect_timeout: 30
+
+# Profile used by the Elementary CLI (`edr report`) to read the observability
+# tables that the dbt package writes to mkt_prod.elementary.
+elementary:
+  target: prod
+  outputs:
+    dev:                       # local report: edr report --profiles-dir . --profile-target dev
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      catalog: mkt_dev
+      schema: "dbt_{{ env_var('DBT_DEV_USER', 'dev') }}_elementary"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 4
+    prod:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      catalog: mkt_prod
+      schema: elementary
+      auth_type: oauth
+      client_id: "{{ env_var('DATABRICKS_CLIENT_ID') }}"
+      client_secret: "{{ env_var('DATABRICKS_CLIENT_SECRET') }}"
+      threads: 4
