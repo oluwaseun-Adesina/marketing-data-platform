@@ -1,0 +1,5 @@
+currency_code,rate_year,units_per_eur,rate_source
+EUR,2024,1.0000,identity
+EUR,2025,1.0000,identity
+EUR,2026,1.0000,identity
+USD,2025,1.1300,ECB euro reference rate - 2025 annual average (as published by Bank of Finland)
