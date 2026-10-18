@@ -1,0 +1,269 @@
+version: 2
+
+models:
+  # ------------------------------------------------------------------ FACT --
+  - name: fct_ad_performance_daily
+    description: '{{ doc("fct_ad_performance_daily") }}'
+    config:
+      tags: ["fact"]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [platform, ad_id, date_day]
+      - elementary.volume_anomalies:
+          config: {severity: warn}
+      - elementary.schema_changes:
+          config: {severity: warn}
+    columns:
+      - name: ad_performance_key
+        description: "Primary key: hash(platform, ad_id, date_day)."
+        data_type: string
+        constraints: [{type: not_null}]
+        data_tests: [unique, not_null]
+      - name: date_day
+        description: Performance date (ad account reporting timezone).
+        data_type: date
+        constraints: [{type: not_null}]
+        data_tests: [not_null]
+      - name: platform
+        description: '{{ doc("col_platform") }}'
+        data_type: string
+        constraints: [{type: not_null}]
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [facebook, snapchat]
+      - name: ad_key
+        description: FK to dim_ads.
+        data_type: string
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_ads')
+                field: ad_key
+      - name: campaign_key
+        description: >
+          FK to dim_campaigns. NULL would mean spend whose campaign cannot be
+          resolved. This is tested as an ERROR, because unattributed spend breaks
+          every "spend by campaign" answer.
+        data_type: string
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_campaigns')
+                field: campaign_key
+      - name: ad_id
+        description: Platform-native ad id.
+        data_type: string
+      - name: ad_group_id
+        description: Platform-native ad set / ad group id.
+        data_type: string
+      - name: campaign_id
+        description: Platform-native campaign id. Unique only WITHIN a platform. Use campaign_key to join.
+        data_type: string
+      - name: account_id
+        description: Platform-native ad account id.
+        data_type: string
+      - name: currency_code
+        description: ISO-4217 currency of spend_local. Facebook accounts bill in USD or EUR. Snapchat is EUR.
+        data_type: string
+        data_tests: [not_null]
+      - name: spend_local
+        description: '{{ doc("col_spend_local") }}'
+        data_type: decimal(18,6)
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0}
+      - name: impressions
+        description: '{{ doc("col_impressions") }}'
+        data_type: bigint
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0}
+      - name: clicks
+        description: '{{ doc("col_clicks") }}'
+        data_type: bigint
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0}
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "<= impressions"
+              config: {severity: warn}
+      - name: has_unreported_metrics
+        description: TRUE if the source sent "null" for impressions or clicks (coalesced to 0).
+        data_type: boolean
+      - name: source_row_count
+        description: Source rows combined into this row (Snapchat = number of countries. Facebook = 1).
+        data_type: int
+      - name: _source_ingested_at
+        description: Latest bronze ingestion time of the source rows. This is the incremental watermark.
+        data_type: timestamp
+      - name: _dbt_loaded_at
+        description: When dbt last wrote this row.
+        data_type: timestamp
+
+  # ------------------------------------------------------------ DIMENSIONS --
+  - name: dim_campaigns
+    description: >
+      Campaigns across platforms. **Grain: one row per platform per campaign_id.**
+      Join to facts on campaign_key. Never join on campaign_name, which is not
+      unique across platforms.
+    columns:
+      - name: campaign_key
+        description: "Primary key: hash(platform, campaign_id)."
+        data_tests: [unique, not_null]
+      - name: platform
+        description: '{{ doc("col_platform") }}'
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [facebook, snapchat]
+      - name: campaign_id
+        description: Platform-native campaign id.
+        data_tests: [not_null]
+      - name: campaign_name
+        description: Campaign name as set in the ad platform (latest version).
+        data_tests: [not_null]
+      - name: account_id
+        description: Ad account owning the campaign (Facebook is derived through ads).
+      - name: account_name
+        description: Ad account name. NULL for Snapchat (no account export provided).
+      - name: account_currency_code
+        description: Billing currency of the account (Facebook only).
+
+  - name: dim_ads
+    description: >
+      Ads (creatives) across platforms, with ad group / ad set attributes.
+      **Grain: one row per platform per ad_id.**
+    columns:
+      - name: ad_key
+        description: "Primary key: hash(platform, ad_id)."
+        data_tests: [unique, not_null]
+      - name: campaign_key
+        description: FK to dim_campaigns. NULL for Snapchat ads whose ad group is missing from the export.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_campaigns')
+                field: campaign_key
+      - name: platform
+        description: '{{ doc("col_platform") }}'
+        data_tests: [not_null]
+      - name: ad_id
+        data_tests: [not_null]
+      - name: ad_name
+        description: Ad / creative name.
+      - name: ad_status
+        description: Facebook delivery status (ACTIVE, PAUSED, ARCHIVED, DELETED). NULL for Snapchat.
+      - name: ad_group_name
+        description: Ad set (Facebook) / ad squad (Snapchat) name.
+
+  # ----------------------------------------------------------------- MARTS --
+  - name: mart_campaign_daily
+    description: '{{ doc("mart_campaign_daily") }}'
+    config:
+      tags: ["consumption"]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:   # also proves one currency per campaign/day
+          arguments:
+            combination_of_columns: [campaign_key, date_day]
+      - elementary.volume_anomalies:
+          config: {severity: warn}
+      - elementary.column_anomalies:
+          arguments:
+            column_name: spend_eur
+            column_anomalies: [sum, null_count]
+          config: {severity: warn}
+    columns:
+      - name: date_day
+        description: Performance date.
+        data_type: date
+        data_tests: [not_null]
+      - name: month_start
+        description: First day of the month of date_day. Use for monthly grouping ("last month").
+        data_type: date
+      - name: platform
+        description: '{{ doc("col_platform") }}'
+        data_type: string
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [facebook, snapchat]
+      - name: campaign_key
+        description: FK to dim_campaigns.
+        data_type: string
+        data_tests: [not_null]
+      - name: campaign_id
+        description: Platform-native campaign id.
+        data_type: string
+      - name: campaign_name
+        description: Campaign name. Use for display and filtering, not as a join key.
+        data_type: string
+        data_tests: [not_null]
+      - name: account_id
+        description: Ad account id.
+        data_type: string
+      - name: account_name
+        description: Ad account name (NULL for Snapchat).
+        data_type: string
+      - name: local_currency_code
+        description: Currency of spend_local for this campaign.
+        data_type: string
+      - name: spend_local
+        description: '{{ doc("col_spend_local") }}'
+        data_type: decimal(18,6)
+      - name: spend_eur
+        description: '{{ doc("col_spend_eur") }}'
+        data_type: decimal(18,6)
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0}
+      - name: impressions
+        description: '{{ doc("col_impressions") }}'
+        data_type: bigint
+      - name: clicks
+        description: '{{ doc("col_clicks") }}'
+        data_type: bigint
+
+  - name: mart_platform_monthly
+    description: '{{ doc("mart_platform_monthly") }}'
+    config:
+      tags: ["consumption"]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [platform, month_start]
+    columns:
+      - name: month_start
+        description: First day of the month.
+      - name: platform
+        description: '{{ doc("col_platform") }}'
+      - name: spend_eur
+        description: '{{ doc("col_spend_eur") }}'
+      - name: impressions
+        description: '{{ doc("col_impressions") }}'
+      - name: clicks
+        description: '{{ doc("col_clicks") }}'
+      - name: campaigns_with_activity
+        description: Distinct campaigns with any row this month. Not additive across months.
+      - name: days_with_activity
+        description: Days in the month with any delivery.
+      - name: ctr
+        description: '{{ doc("metric_ctr") }}'
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0, max_value: 1}
+      - name: cpc_eur
+        description: '{{ doc("metric_cpc") }}'
+      - name: cpm_eur
+        description: '{{ doc("metric_cpm") }}'

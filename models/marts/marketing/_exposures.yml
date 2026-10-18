@@ -1,0 +1,40 @@
+version: 2
+
+# Exposures make the CONSUMPTION layer visible in the lineage graph:
+# raw -> staging -> intermediate -> marts -> who uses them.
+# They also make impact analysis concrete: `dbt ls -s +exposure:marketing_ai_analyst`
+# lists every model an AI-agent answer depends on.
+
+exposures:
+  - name: marketing_performance_dashboard
+    label: Marketing Performance Dashboard
+    type: dashboard
+    maturity: medium
+    description: >
+      BI dashboard for the Marketing team: spend, impressions, clicks, CTR, CPC
+      and CPM by platform, campaign and month. Replaces manual per-platform
+      exports to Excel.
+    depends_on:
+      - ref('mart_campaign_daily')
+      - ref('mart_platform_monthly')
+    owner:
+      name: Data Engineering
+      email: data-engineering@example.com
+
+  - name: marketing_ai_analyst
+    label: Marketing AI Analyst (natural-language questions)
+    type: application
+    maturity: low
+    description: >
+      An AI agent (e.g. Claude via a Databricks SQL MCP connection, or a
+      Databricks Genie space) answering questions like "How much did we spend
+      on Facebook last month?" It is granted SELECT on the marts schema only
+      (see databricks/02_grants.sql) and relies on the column comments that
+      dbt persists to Unity Catalog (persist_docs).
+    depends_on:
+      - ref('mart_campaign_daily')
+      - ref('mart_platform_monthly')
+      - ref('dim_campaigns')
+    owner:
+      name: Data Engineering
+      email: data-engineering@example.com
