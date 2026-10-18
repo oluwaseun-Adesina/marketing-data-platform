@@ -1,0 +1,62 @@
+version: 2
+
+sources:
+  - name: facebook_ads
+    description: >
+      Raw Facebook (Meta) Ads exports, loaded unchanged into Unity Catalog by
+      `databricks/01_bronze_load.sql` (COPY INTO from the landing volume).
+      Every business column is STRING. Typing happens in staging.
+    database: "{{ env_var('DBT_RAW_CATALOG', 'mkt_raw') }}"
+    schema: facebook_ads
+    config:
+      loaded_at_field: _ingested_at
+      freshness:            # a daily export is expected; alert if it stops arriving
+        warn_after: {count: 26, period: hour}
+        error_after: {count: 72, period: hour}
+    tables:
+      - name: ads_stats
+        description: >
+          Daily ad performance. One row per ad_id per ad_date (verified: 92,300
+          rows, 92,300 distinct ad/date pairs). Spend is in the ACCOUNT currency,
+          which differs between accounts (USD and EUR).
+        columns:
+          - name: ad_id
+            description: Facebook ad id. Numeric-looking but treated as an identifier (string).
+            data_tests: [not_null]
+          - name: account_id
+            description: Ad account that owns the ad. Determines the spend currency.
+          - name: ad_spend
+            description: Spend in the account currency, 2 decimal places.
+          - name: ad_impressions
+            description: Impressions. The text "null" means no impressions were recorded.
+          - name: ad_clicks
+            description: Clicks. The text "null" means no clicks were recorded (24k+ rows).
+          - name: ad_date
+            description: Performance date (YYYY-MM-DD) in the ad account's reporting timezone.
+          - name: _ingested_at
+            description: When the row was loaded into bronze.
+        data_tests:
+          - elementary.schema_changes:
+              config: {severity: warn}
+          - elementary.volume_anomalies:
+              config: {severity: warn}
+
+      - name: ads
+        description: Ad (creative) attributes with parent ad set, campaign and account ids.
+        config:
+          freshness: null
+        columns:
+          - name: ad_id
+            data_tests: [not_null]
+      - name: ad_groups
+        description: Facebook ad sets (named "ad groups" in this export).
+        config:
+          freshness: null
+      - name: campaigns
+        description: Facebook campaigns. This export has NO account_id. The account is derived through ads.
+        config:
+          freshness: null
+      - name: accounts
+        description: Ad accounts, including the billing currency (ad_currency_code).
+        config:
+          freshness: null
