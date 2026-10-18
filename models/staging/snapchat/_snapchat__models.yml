@@ -1,0 +1,98 @@
+version: 2
+
+models:
+  - name: stg_snapchat__ad_stats
+    description: >
+      Typed, deduplicated Snapchat daily ad performance.
+      **Grain: one row per ad_id per date_day per country_code.**
+      Not yet comparable to Facebook. See int_snapchat__ad_daily for the ad/day roll-up.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [ad_id, date_day, country_code]
+    columns:
+      - name: ad_id
+        description: Snapchat ad id (UUID). Renamed from ad_detail_id.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_snapchat__ads')
+                field: ad_id
+      - name: date_day
+        data_tests: [not_null]
+      - name: country_code
+        description: Upper-case ISO-3166 alpha-2 delivery country.
+        data_tests: [not_null]
+      - name: currency_code
+        description: Currency of spend, given per row.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fx_rates_annual')
+                field: currency_code
+      - name: spend
+        description: Spend in currency_code units (not micro-currency).
+        data_tests:
+          - not_null
+          # Guard against a micro-currency file: no single ad/country/day in this
+          # account plausibly spends 100k. A 1,000,000x unit error would.
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0, max_value: 100000}
+      - name: impressions
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0}
+      - name: clicks
+        description: NULL means the source sent "null" (treated as 0 downstream).
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments: {min_value: 0}
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "<= impressions"
+              config:
+                where: "impressions is not null"
+                severity: warn
+
+  - name: stg_snapchat__ads
+    description: "Snapchat ads. **Grain: one row per ad_id**, latest version."
+    columns:
+      - name: ad_id
+        data_tests: [unique, not_null]
+      - name: ad_group_id
+        description: >
+          Parent ad group. NOTE: 304 of 2,513 ads reference ad groups missing from
+          the ad-group export. None of them have spend today, so this is a warning,
+          not an error. If one starts spending, the fact table still keeps its
+          spend (left joins) and the not_null test on the fact's campaign_id fails loudly.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_snapchat__ad_groups')
+                field: ad_group_id
+              config: {severity: warn}
+
+  - name: stg_snapchat__ad_groups
+    description: "Snapchat ad groups. **Grain: one row per ad_group_id**, latest version (raw history deduplicated)."
+    columns:
+      - name: ad_group_id
+        data_tests: [unique, not_null]
+      - name: campaign_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_snapchat__campaigns')
+                field: campaign_id
+
+  - name: stg_snapchat__campaigns
+    description: "Snapchat campaigns. **Grain: one row per campaign_id.**"
+    columns:
+      - name: campaign_id
+        data_tests: [unique, not_null]
+      - name: account_id
+        data_tests: [not_null]
+      - name: campaign_name
+        data_tests: [not_null]
