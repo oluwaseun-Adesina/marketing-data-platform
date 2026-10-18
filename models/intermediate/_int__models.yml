@@ -1,0 +1,93 @@
+version: 2
+
+models:
+  - name: int_facebook__ad_daily
+    description: >
+      Facebook ad/day performance in the shared cross-platform shape, enriched with
+      ad group, campaign and account currency. NULL metrics are coalesced to 0.
+      **Grain: one row per ad_id per date_day.**
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [ad_id, date_day]
+    columns:
+      - name: currency_code
+        data_tests: [not_null]
+
+  - name: int_snapchat__ad_daily
+    description: >
+      Snapchat country-level rows summed to ad/day, enriched with ad group,
+      campaign and account. **Grain: one row per ad_id per date_day.**
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:   # also proves: one currency per ad/day
+          arguments:
+            combination_of_columns: [ad_id, date_day]
+    columns:
+      - name: source_row_count
+        description: Number of country rows that were summed into this ad/day.
+
+  - name: int_facebook__campaign_accounts
+    description: >
+      Facebook campaign -> ad account mapping, derived from ads because the campaign
+      export has no account_id. **Grain: one row per campaign_id.**
+    columns:
+      - name: campaign_id
+        data_tests: [unique, not_null]
+
+  - name: int_marketing__ad_daily_unioned
+    description: >
+      Ephemeral union of all platforms with surrogate keys. Inlined into
+      fct_ad_performance_daily. **Grain: one row per platform per ad_id per date_day.**
+
+unit_tests:
+  - name: snapchat_country_rows_roll_up_to_one_ad_day
+    description: >
+      Two country rows for the same ad/day must become ONE row with summed
+      metrics. A "null" click count on one country counts as 0 and sets the
+      has_unreported_metrics flag. The ad group with two history versions in
+      staging is already deduplicated, so there is no fan-out.
+    model: int_snapchat__ad_daily
+    given:
+      - input: ref('stg_snapchat__ad_stats')
+        rows:
+          - {ad_id: ad1, date_day: 2024-03-01, country_code: DE, currency_code: EUR, spend: 10.50, impressions: 1000, clicks: 7,    _ingested_at: "2024-03-02 01:00:00"}
+          - {ad_id: ad1, date_day: 2024-03-01, country_code: CH, currency_code: EUR, spend: 4.25,  impressions: 400,  clicks: null, _ingested_at: "2024-03-02 02:00:00"}
+          - {ad_id: ad1, date_day: 2024-03-02, country_code: DE, currency_code: EUR, spend: 1.00,  impressions: 100,  clicks: 1,    _ingested_at: "2024-03-03 01:00:00"}
+      - input: ref('stg_snapchat__ads')
+        rows:
+          - {ad_id: ad1, ad_group_id: ag1}
+      - input: ref('stg_snapchat__ad_groups')
+        rows:
+          - {ad_group_id: ag1, campaign_id: c1}
+      - input: ref('stg_snapchat__campaigns')
+        rows:
+          - {campaign_id: c1, account_id: acct1}
+    expect:
+      rows:
+        - {platform: snapchat, ad_id: ad1, date_day: 2024-03-01, campaign_id: c1, account_id: acct1, spend_local: 14.75, impressions: 1400, clicks: 7, has_unreported_metrics: true,  source_row_count: 2, _source_ingested_at: "2024-03-02 02:00:00"}
+        - {platform: snapchat, ad_id: ad1, date_day: 2024-03-02, campaign_id: c1, account_id: acct1, spend_local: 1.00,  impressions: 100,  clicks: 1, has_unreported_metrics: false, source_row_count: 1, _source_ingested_at: "2024-03-03 01:00:00"}
+
+  - name: facebook_null_metrics_become_zero_and_spend_survives_missing_ad
+    description: >
+      "null" clicks/impressions become 0 with the audit flag set. A stats row
+      whose ad is missing from the ads export is KEPT (spend must not vanish),
+      with a NULL campaign_id for the fact's tests to catch.
+    model: int_facebook__ad_daily
+    given:
+      - input: ref('stg_facebook__ad_stats')
+        rows:
+          - {ad_id: "1", account_id: a1, date_day: 2025-01-01, spend: 5.00, impressions: 900,  clicks: null}
+          - {ad_id: "2", account_id: a1, date_day: 2025-01-01, spend: 0.00, impressions: null, clicks: null}
+          - {ad_id: "9", account_id: a1, date_day: 2025-01-01, spend: 3.00, impressions: 10,   clicks: 1}
+      - input: ref('stg_facebook__ads')
+        rows:
+          - {ad_id: "1", ad_group_id: g1, campaign_id: c1}
+          - {ad_id: "2", ad_group_id: g1, campaign_id: c1}
+      - input: ref('stg_facebook__accounts')
+        rows:
+          - {account_id: a1, currency_code: USD}
+    expect:
+      rows:
+        - {ad_id: "1", campaign_id: c1,   currency_code: USD, spend_local: 5.00, impressions: 900, clicks: 0, has_unreported_metrics: true}
+        - {ad_id: "2", campaign_id: c1,   currency_code: USD, spend_local: 0.00, impressions: 0,   clicks: 0, has_unreported_metrics: true}
+        - {ad_id: "9", campaign_id: null, currency_code: USD, spend_local: 3.00, impressions: 10,  clicks: 1, has_unreported_metrics: false}
