@@ -1,0 +1,97 @@
+# -----------------------------------------------------------------------------
+# CD: deploy to production on merge to main, and refresh daily.
+#
+#   * Runs in the GitHub "production" ENVIRONMENT. The prod service-principal
+#     secrets exist only there, so a pull-request workflow can never read them.
+#     The environment can also require a manual approval and be restricted to
+#     the main branch (Settings > Environments > production).
+#   * Authenticates as sp-dbt-prod with OAuth M2M. No personal token anywhere.
+#   * Saves the production manifest so CI can do slim, deferred builds.
+#   * Publishes dbt docs (static HTML) and the Elementary observability report.
+# -----------------------------------------------------------------------------
+name: CD (production)
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * *"            # daily 05:17 UTC (06:17 Lagos), after the nightly raw export
+  workflow_dispatch: {}
+
+concurrency:
+  group: production
+  cancel-in-progress: false          # never kill a prod run half-way through a merge
+
+permissions:
+  contents: read
+
+env:
+  DBT_PROFILES_DIR: .
+  DBT_TARGET: prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DBX_PROD_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DBX_PROD_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dbt
+        run: pip install -r requirements.txt
+
+      - run: dbt deps
+
+      - name: Check connection as the production service principal
+        run: dbt debug --target prod
+
+      - name: Source freshness (alerts if a platform export stopped arriving)
+        run: dbt source freshness --target prod
+        continue-on-error: true      # warn, don't block. Stale-but-correct data is better than none
+
+      - name: dbt build (production)
+        # Unit tests already passed in CI on the same code. They test logic,
+        # not data, so re-running them against prod adds nothing.
+        run: dbt build --target prod --exclude-resource-type unit_test
+
+      - name: Generate docs
+        if: always()
+        run: dbt docs generate --target prod --static
+
+      - name: Save production manifest (enables slim CI)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-manifest
+          path: target/manifest.json
+          retention-days: 30
+          overwrite: true
+
+      - name: Elementary observability report
+        if: always()
+        continue-on-error: true
+        run: |
+          pip install "elementary-data[databricks]==0.26.1"
+          edr report --profiles-dir . --profile-target prod \
+                     --file-path edr_target/elementary_report.html
+
+      - name: Upload docs + Elementary report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-reports-${{ github.run_number }}
+          path: |
+            target/static_index.html
+            edr_target/elementary_report.html
+            target/run_results.json
+          retention-days: 30

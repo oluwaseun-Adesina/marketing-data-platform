@@ -1,0 +1,94 @@
+# -----------------------------------------------------------------------------
+# CI: validate every pull request against REAL data, in an isolated schema set,
+# before it can be merged.
+#
+#   * Runs as the CI service principal (sp-dbt-ci): it can write only to
+#     mkt_ci and read raw + prod. It cannot touch production tables.
+#   * Each PR builds into mkt_ci.pr_<number>_* (see generate_schema_name).
+#   * Slim CI: builds only models changed in this PR plus everything downstream
+#     (state:modified+). Unchanged upstream models are read from prod (--defer).
+#     The first run, before any prod manifest exists, does a full build.
+#   * `dbt build` runs models, seeds, data tests AND unit tests in DAG order,
+#     so a failing test stops its downstream models from being built.
+# -----------------------------------------------------------------------------
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true          # a new push supersedes the running check
+
+permissions:
+  contents: read
+  actions: read                     # to download the prod manifest artifact
+
+env:
+  DBT_PROFILES_DIR: .
+  DBT_TARGET: ci
+  DBT_CI_SCHEMA: pr_${{ github.event.pull_request.number }}
+  DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+  DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+  DATABRICKS_CLIENT_ID: ${{ secrets.DBX_CI_CLIENT_ID }}
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.DBX_CI_CLIENT_SECRET }}
+
+jobs:
+  dbt-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dbt
+        run: pip install -r requirements.txt
+
+      - name: Install dbt packages
+        run: dbt deps
+
+      - name: Parse (fast fail on YAML / Jinja errors, no warehouse needed)
+        run: dbt parse
+
+      - name: Check connection as the CI service principal
+        run: dbt debug --target ci
+
+      - name: Fetch production manifest for slim CI
+        id: prod_state
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          workflow: cd.yml
+          branch: main
+          name: prod-manifest
+          path: prod-state
+          if_no_artifact_found: warn
+
+      - name: dbt build (models + data tests + unit tests)
+        run: |
+          if [ -f prod-state/manifest.json ]; then
+            echo "Slim CI: modified models and their children, deferring to prod"
+            dbt build --target ci --select state:modified+ --defer --state prod-state
+          else
+            echo "No prod manifest yet: full build"
+            dbt build --target ci
+          fi
+
+      - name: Generate docs (validates descriptions and doc blocks compile)
+        run: dbt docs generate --target ci --static
+
+      - name: Upload run artifacts (debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-run-${{ github.event.pull_request.number }}
+          path: |
+            target/run_results.json
+            target/manifest.json
+            target/static_index.html
+          retention-days: 7
